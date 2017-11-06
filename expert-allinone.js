@@ -9,6 +9,113 @@ var npwr = nodenames['vcc'];
 
 var chipLayoutIsVisible = true;  // only modified in expert mode
 
+var ctrace = false;
+var traceTheseNodes = [];
+var traceTheseTransistors = [];
+var loglevel = 0;
+var recalclist = new Array();
+var recalcHash = new Array();
+var group = new Array();
+
+var prevHzTimeStamp=0;
+var prevHzCycleCount=0;
+var prevHzEstimate1=1;
+var prevHzEstimate2=1;
+var HzSamplingRate=10;
+var logbox;
+var logboxAppend=true;
+
+var centerx=300, centery=300;
+var zoom=1;
+var dragMouseX, dragMouseY, moved;
+var statbox;
+var findThese;
+var labelThese=[];
+
+var highlightThese;
+
+var consolegetc;    // global variable to hold last keypress in the console area
+var consolebox;
+
+var chipsurround;
+
+var traceChecksum='';
+var goldenChecksum;
+
+var table;
+var selected;
+
+// Some constants for the graphics presentation
+// the canvas is embedded in an 800x600 clipping div
+//   which gives rise to some of the 300 and 400 values in the code
+//   there are also some 600 values
+// the 6502D chip coords are in the box (216,179) to (8983,9807)
+// we have 4 canvases all the same size, now 2000 pixels square
+//   chip background - the layout
+//   overlay - a red/white transparency to show logic high or low
+//   hilite - to show the selected polygon
+//   hitbuffer - abusing color values to return which polygon is under a point
+// we no longer use a scaling transform - we now scale the chip data at 
+//   the point of drawing line segments
+// if the canvas is any smaller than chip coordinates there will be
+//   rounding artifacts, and at high zoom there will be anti-aliasing on edges.
+var grMaxZoom=12;
+var grChipSize=10000;
+var grCanvasSize=2000;
+var grLineWidth=1;
+
+// Index of layerNames corresponds to index into drawLayers
+var layernames = ['metal', 'switched diffusion', 'inputdiode', 'grounded diffusion', 'powered diffusion', 'polysilicon'];
+var colors = ['rgba(128,128,192,0.4)','#FFFF00','#FF00FF','#4DFF4D',
+              '#FF4D4D','#801AC0','rgba(128,0,255,0.75)'];
+var drawlayers = [true, true, true, true, true, true];
+              
+// some modes and parameters which can be passed in from the URL query
+var moveHereFirst;
+var expertMode=true;
+var animateChipLayout = true;
+var userCode=[];
+var userResetLow;
+var userResetHigh;
+var headlessSteps=1000;
+var noSimulation=false;
+var testprogram=[];
+var testprogramAddress;
+
+var memory = Array();
+var cycle = 0;
+var trace = Array();
+var logstream = Array();
+var running = false;
+var logThese=[];
+var presetLogLists=[
+		['cycle'],
+		['ab','db','rw','Fetch','pc','a','x','y','s','p'],
+		['Execute','State'],
+		['ir','tcstate','-pd'],
+		['adl','adh','sb','alu'],
+		['alucin','alua','alub','alucout','aluvout','dasb'],
+		['plaOutputs','DPControl'],
+		['idb','dor'],
+		['irq','nmi','res'],
+	];
+
+// triggers for breakpoints, watchpoints, input pin events
+// almost always are undefined when tested, so minimal impact on performance
+clockTriggers={};
+writeTriggers={};
+readTriggers={};
+fetchTriggers={};
+
+// example instruction tracing triggers
+// fetchTriggers[0x20]="console.log('0x'+readAddressBus().toString(16)+': JSR');";
+// fetchTriggers[0x60]="console.log('0x'+readAddressBus().toString(16)+': RTS');";
+// fetchTriggers[0x4c]="console.log('0x'+readAddressBus().toString(16)+': JMP');";
+
+    
+// ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+        
 function setupNodes(){
 	for(var i in segdefs){
 		var seg = segdefs[i];
@@ -104,14 +211,9 @@ function hitBufferNode(ctx, i, w){
 	}
 }
 
-function hexdigit(n){return '0123456789ABCDEF'.charAt(n);}
-
-
-/////////////////////////
-//
-// Drawing Runtime
-//
-/////////////////////////
+function hexdigit(n){
+    return '0123456789ABCDEF'.charAt(n);
+}
 
 function refresh(){
 	if(!chipLayoutIsVisible) return;
@@ -252,78 +354,9 @@ function nodeName(n) {
 	return '';
 }
 
-function now(){return  new Date().getTime();}
-/*
- Copyright (c) 2010 Brian Silverman, Barry Silverman, Ed Spittles
-
- Permission is hereby granted, free of charge, to any person obtaining a copy
- of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights
- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- copies of the Software, and to permit persons to whom the Software is
- furnished to do so, subject to the following conditions:
-
- The above copyright notice and this permission notice shall be included in
- all copies or substantial portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- THE SOFTWARE.
-*/
-
-var centerx=300, centery=300;
-var zoom=1;
-var dragMouseX, dragMouseY, moved;
-var statbox;
-var findThese;
-var labelThese=[];
-
-// Some constants for the graphics presentation
-// the canvas is embedded in an 800x600 clipping div
-//   which gives rise to some of the 300 and 400 values in the code
-//   there are also some 600 values
-// the 6502D chip coords are in the box (216,179) to (8983,9807)
-// we have 4 canvases all the same size, now 2000 pixels square
-//   chip background - the layout
-//   overlay - a red/white transparency to show logic high or low
-//   hilite - to show the selected polygon
-//   hitbuffer - abusing color values to return which polygon is under a point
-// we no longer use a scaling transform - we now scale the chip data at 
-//   the point of drawing line segments
-// if the canvas is any smaller than chip coordinates there will be
-//   rounding artifacts, and at high zoom there will be anti-aliasing on edges.
-var grMaxZoom=12;
-var grChipSize=10000;
-var grCanvasSize=2000;
-var grLineWidth=1;
-
-// Index of layerNames corresponds to index into drawLayers
-var layernames = ['metal', 'switched diffusion', 'inputdiode', 'grounded diffusion', 'powered diffusion', 'polysilicon'];
-var colors = ['rgba(128,128,192,0.4)','#FFFF00','#FF00FF','#4DFF4D',
-              '#FF4D4D','#801AC0','rgba(128,0,255,0.75)'];
-var drawlayers = [true, true, true, true, true, true];
-              
-// some modes and parameters which can be passed in from the URL query
-var moveHereFirst;
-var expertMode=true;
-var animateChipLayout = true;
-var userCode=[];
-var userResetLow;
-var userResetHigh;
-var headlessSteps=1000;
-var noSimulation=false;
-var testprogram=[];
-var testprogramAddress;
-
-/////////////////////////
-//
-// Drawing Setup
-//
-/////////////////////////
+function now(){
+    return  new Date().getTime();
+}
 
 // try to present a meaningful page before starting expensive work
 function setup(){
@@ -484,13 +517,6 @@ function updateChipLayoutAnimation(isOn){
 	document.getElementById('animateModeCheckbox').checked = animateChipLayout;
 }
 
-/////////////////////////
-//
-// User Interface
-//
-/////////////////////////
-
-
 // these keyboard actions are primarily for the chip display
 function handleKey(e){
 	var c = e.charCode || e.keyCode;
@@ -620,8 +646,6 @@ function boxLabel(args) {
 	ctx.strokeText(text, boxXmin, boxYmin);
 	ctx.fillText(text, boxXmin, boxYmin);
 }
-
-var highlightThese;
 
 // flash some set of nodes according to user input
 // also zoom to fit those nodes (not presently optional)
@@ -763,15 +787,10 @@ function setupExpertMode(isOn){
 		document.getElementById('layoutControlPanel').style.display = 'block';
 }
 
-var consolegetc;    // global variable to hold last keypress in the console area
-var consolebox;
-
 function setupConsole(){
 	consolebox=document.getElementById('consolebox');
 	consolebox.onkeypress=function(e){consolegetc=e.charCode || e.keyCode;};
 }
-
-var chipsurround;
 
 function updateChipLayoutVisibility(isOn){
 	chipLayoutIsVisible=isOn;
@@ -846,12 +865,6 @@ function moveHere(place){
 	setZoom(place[2]);
 }
 
-/////////////////////////
-//
-// Etc.
-//
-/////////////////////////
-
 function setChipStyle(props){
 	for(var i in props){
 		chipbg.style[i] = props[i];
@@ -860,35 +873,6 @@ function setChipStyle(props){
 		hitbuffer.style[i] = props[i];
 	}
 }
-/*
- Copyright (c) 2010 Brian Silverman, Barry Silverman
-
- Permission is hereby granted, free of charge, to any person obtaining a copy
- of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights
- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- copies of the Software, and to permit persons to whom the Software is
- furnished to do so, subject to the following conditions:
-
- The above copyright notice and this permission notice shall be included in
- all copies or substantial portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- THE SOFTWARE.
-*/
-
-var ctrace = false;
-var traceTheseNodes = [];
-var traceTheseTransistors = [];
-var loglevel = 0;
-var recalclist = new Array();
-var recalcHash = new Array();
-var group = new Array();
 
 function recalcNodeList(list){
 	var n = list[0];
@@ -976,7 +960,6 @@ function addNodeToGroup(i){
 			addNodeToGroup(other);});
 }
 
-
 function getNodeValue(){
 	if(arrayContains(group, ngnd)) return false;
 	if(arrayContains(group, npwr)) return true;
@@ -989,7 +972,6 @@ function getNodeValue(){
 	}
 	return false;
 }
-
 
 function isNodeHigh(nn){
 	return(nodes[nn].state);
@@ -1042,7 +1024,6 @@ function showState(str){
 	refresh();
 }
 
-
 function setPd(name){
 	var nn = nodenames[name];
 	nodes[nn].pullup = false;
@@ -1063,31 +1044,9 @@ function setLow(name){
 	recalcNodeList([nn]);
 }
 
-function arrayContains(arr, el){return arr.indexOf(el)!=-1;}
-/*
- Copyright (c) 2010 Brian Silverman, Barry Silverman
-
- Permission is hereby granted, free of charge, to any person obtaining a copy
- of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights
- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- copies of the Software, and to permit persons to whom the Software is
- furnished to do so, subject to the following conditions:
-
- The above copyright notice and this permission notice shall be included in
- all copies or substantial portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- THE SOFTWARE.
-*/
-
-var table;
-var selected;
+function arrayContains(arr, el){
+    return arr.indexOf(el)!=-1;
+}
 
 function setupTable(){
 	table = document.getElementById('memtable');
@@ -1132,7 +1091,9 @@ function setCellValue(n, val){
 	cellEl(n).innerHTML=hexByte(val);
 }
 
-function getCellValue(n){return cellEl(n).val;}
+function getCellValue(n){
+    return cellEl(n).val;
+}
 
 function selectCell(n){
 	unselectCell();
@@ -1155,45 +1116,6 @@ function cellEl(n){
 	var e = table.childNodes[r].childNodes[c+1];
 	return e;
 }
-/*
- Copyright (c) 2010 Brian Silverman, Barry Silverman, Ed Spittles, Achim Breidenbach
-
- Permission is hereby granted, free of charge, to any person obtaining a copy
- of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights
- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- copies of the Software, and to permit persons to whom the Software is
- furnished to do so, subject to the following conditions:
-
- The above copyright notice and this permission notice shall be included in
- all copies or substantial portions of the Software.
-
- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- THE SOFTWARE.
-*/
-
-var memory = Array();
-var cycle = 0;
-var trace = Array();
-var logstream = Array();
-var running = false;
-var logThese=[];
-var presetLogLists=[
-		['cycle'],
-		['ab','db','rw','Fetch','pc','a','x','y','s','p'],
-		['Execute','State'],
-		['ir','tcstate','-pd'],
-		['adl','adh','sb','alu'],
-		['alucin','alua','alub','alucout','aluvout','dasb'],
-		['plaOutputs','DPControl'],
-		['idb','dor'],
-		['irq','nmi','res'],
-	];
 
 function loadProgram(){
 	// a moderate size of static testprogram might be loaded
@@ -1283,42 +1205,54 @@ function testNMI(n){
         mWrite(0xfffc, 0x00); // reset vector
         mWrite(0xfffd, 0x00);
 
-        for(var i=0;i<n;i++){step();}
+        for(var i=0;i<n;i++){
+            step();
+        }
         setLow('nmi');
         chipStatus();
-        for(var i=0;i<8;i++){step();}
+        for(var i=0;i<8;i++){
+            step();
+        }
         setHigh('nmi');
         chipStatus();
-        for(var i=0;i<16;i++){step();}
+        for(var i=0;i<16;i++){
+            step();
+        }
 }
 
 function initChip(){
-        var start = now();
+    var start = now();
 	for(var nn in nodes) {
 		nodes[nn].state = false;
 		nodes[nn].float = true;
 	}
-
 	nodes[ngnd].state = false;
 	nodes[ngnd].float = false;
 	nodes[npwr].state = true;
 	nodes[npwr].float = false;
-	for(var tn in transistors) transistors[tn].on = false;
+	for(var tn in transistors)
+        transistors[tn].on = false;
 	setLow('res');
 	setLow('clk0');
 	setHigh('rdy'); setLow('so');
 	setHigh('irq'); setHigh('nmi');
 	recalcNodeList(allNodes()); 
-	for(var i=0;i<8;i++){setHigh('clk0'), setLow('clk0');}
+	for(var i=0;i<8;i++){
+        setHigh('clk0'), setLow('clk0');
+    }
 	setHigh('res');
-	for(var i=0;i<18;i++){halfStep();} // avoid updating graphics and trace buffer before user code
+    // avoid updating graphics and trace buffer before user code
+	for(var i=0;i<18;i++){
+        halfStep();
+    }
 	refresh();
 	cycle = 0;
 	trace = Array();
 	if(typeof expertMode != "undefined")
 		updateLogList();
 	chipStatus();
-	if(ctrace)console.log('initChip done after', now()-start);
+	if(ctrace)
+        console.log('initChip done after', now()-start);
 }
 
 function signalSet(n){
@@ -1349,9 +1283,6 @@ function updateLogList(names){
 	initLogbox(logThese);
 }
 
-var traceChecksum='';
-var goldenChecksum;
-
 // simulate a single clock phase, updating trace and highlighting layout
 function step(){
 	var s=stateString();
@@ -1365,18 +1296,6 @@ function step(){
 	cycle++;
 	chipStatus();
 }
-
-// triggers for breakpoints, watchpoints, input pin events
-// almost always are undefined when tested, so minimal impact on performance
-clockTriggers={};
-writeTriggers={};
-readTriggers={};
-fetchTriggers={};
-
-// example instruction tracing triggers
-// fetchTriggers[0x20]="console.log('0x'+readAddressBus().toString(16)+': JSR');";
-// fetchTriggers[0x60]="console.log('0x'+readAddressBus().toString(16)+': RTS');";
-// fetchTriggers[0x4c]="console.log('0x'+readAddressBus().toString(16)+': JMP');";
 
 // simulate a single clock phase with no update to graphics or trace
 function halfStep(){
@@ -1408,12 +1327,30 @@ function handleBusWrite(){
 	}
 }
 
-function readAddressBus(){return readBits('ab', 16);}
-function readDataBus(){return readBits('db', 8);}
-function readA(){return readBits('a', 8);}
-function readY(){return readBits('y', 8);}
-function readX(){return readBits('x', 8);}
-function readP(){return readBits('p', 8);}
+function readAddressBus(){
+    return readBits('ab', 16);
+}
+
+function readDataBus(){
+    return readBits('db', 8);
+}
+
+function readA(){
+    return readBits('a', 8);
+}
+
+function readY(){
+    return readBits('y', 8);
+}
+
+function readX(){
+    return readBits('x', 8);
+}
+
+function readP(){
+    return readBits('p', 8);
+}
+
 function readPstring(){
    var result;
    result = (isNodeHigh(nodenames['p7'])?'N':'n') +
@@ -1426,10 +1363,22 @@ function readPstring(){
             (isNodeHigh(nodenames['p0'])?'C':'c');
    return result;
 }
-function readSP(){return readBits('s', 8);}
-function readPC(){return (readBits('pch', 8)<<8) + readBits('pcl', 8);}
-function readPCL(){return readBits('pcl', 8);}
-function readPCH(){return readBits('pch', 8);}
+
+function readSP(){
+    return readBits('s', 8);
+}
+
+function readPC(){
+    return (readBits('pch', 8)<<8) + readBits('pcl', 8);
+}
+
+function readPCL(){
+    return readBits('pcl', 8);
+}
+
+function readPCH(){
+    return readBits('pch', 8);
+}
 
 // for one-hot or few-hot signal collections we want to list the active ones
 // and for brevity we remove the common prefix
@@ -1458,11 +1407,11 @@ function listActiveTCStates() {
 	return s.join("+");
 }
 
-    // Show all time code node states (active and inactive) in fixed format,
-    // with T1/T6 indication in square brackets. ".." for a node indicates
-    // inactive state, "T"* for a node indicates active state.
-    // For discussion of this reconstruction, see:
-    // http://visual6502.org/wiki/index.php?title=6502_Timing_States
+// Show all time code node states (active and inactive) in fixed format,
+// with T1/T6 indication in square brackets. ".." for a node indicates
+// inactive state, "T"* for a node indicates active state.
+// For discussion of this reconstruction, see:
+// http://visual6502.org/wiki/index.php?title=6502_Timing_States
 function allTCStates( useHTML )
 {
     var s = "";
@@ -1521,6 +1470,7 @@ function allTCStates( useHTML )
 function readBit(name){
         return isNodeHigh(nodenames[name])?1:0;
 }
+
 function readBits(name, n){
 	var res = 0;
 	for(var i=0;i<n;i++){
@@ -1614,7 +1564,9 @@ function mRead(a){
 	else return memory[a];
 }
 
-function mWrite(a, d){memory[a]=d;}
+function mWrite(a, d){
+    memory[a]=d;
+}
 
 function clkNodes(){
 	var res = Array();
@@ -1735,12 +1687,6 @@ function goForN(n){
 	stop.style.visibility = 'hidden';
 }
 
-var prevHzTimeStamp=0;
-var prevHzCycleCount=0;
-var prevHzEstimate1=1;
-var prevHzEstimate2=1;
-var HzSamplingRate=10;
-
 // return an averaged speed: called periodically during normal running
 function estimatedHz(){
 	if(cycle%HzSamplingRate!=3)
@@ -1771,7 +1717,6 @@ function instantaneousHz(){
 	return prevHzEstimate1
 }
 
-var logbox;
 function initLogbox(names){
 	logbox=document.getElementById('logstream');
 	if(logbox==null)return;
@@ -1781,8 +1726,6 @@ function initLogbox(names){
 	logStream.push("<td class=header>" + names.join("</td><td class=header>") + "</td>");
 	logbox.innerHTML = "<tr>"+logStream.join("</tr><tr>")+"</tr>";
 }
-
-var logboxAppend=true;
 
 // can append or prepend new states to the log table
 // when we reverse direction we need to reorder the log stream
@@ -1833,8 +1776,13 @@ function setMem(arr){
 	for(var i=0;i<0x200;i++){mWrite(i, arr[i]); setCellValue(i, arr[i]);}
 }
 
-function hexWord(n){return (0x10000+n).toString(16).substring(1)}
-function hexByte(n){return (0x100+n).toString(16).substring(1)}
+function hexWord(n){
+    return (0x10000+n).toString(16).substring(1)
+}
+    
+function hexByte(n){
+    return (0x100+n).toString(16).substring(1)
+}
 
 function adler32(x){
 	var a=1;
@@ -1857,158 +1805,159 @@ function dis6502toHTML(byte){
 // opcode lookup for 6502 - not quite a disassembly
 //   javascript derived from Debugger.java by Achim Breidenbach
 var dis6502={
-0x00:"BRK",
-0x01:"ORA (zp,X)",
-0x05:"ORA zp",
-0x06:"ASL zp",
-0x08:"PHP",
-0x09:"ORA #",
-0x0A:"ASL ",
-0x0D:"ORA Abs",
-0x0E:"ASL Abs",
-0x10:"BPL ",
-0x11:"ORA (zp),Y",
-0x15:"ORA zp,X",
-0x16:"ASL zp,X",
-0x18:"CLC",
-0x19:"ORA Abs,Y",
-0x1D:"ORA Abs,X",
-0x1E:"ASL Abs,X",
-0x20:"JSR Abs",
-0x21:"AND (zp,X)",
-0x24:"BIT zp",
-0x25:"AND zp",
-0x26:"ROL zp",
-0x28:"PLP",
-0x29:"AND #",
-0x2A:"ROL ",
-0x2C:"BIT Abs",
-0x2D:"AND Abs",
-0x2E:"ROL Abs",
-0x30:"BMI ",
-0x31:"AND (zp),Y",
-0x35:"AND zp,X",
-0x36:"ROL zp,X",
-0x38:"SEC",
-0x39:"AND Abs,Y",
-0x3D:"AND Abs,X",
-0x3E:"ROL Abs,X",
-0x40:"RTI",
-0x41:"EOR (zp,X)",
-0x45:"EOR zp",
-0x46:"LSR zp",
-0x48:"PHA",
-0x49:"EOR #",
-0x4A:"LSR ",
-0x4C:"JMP Abs",
-0x4D:"EOR Abs",
-0x4E:"LSR Abs",
-0x50:"BVC ",
-0x51:"EOR (zp),Y",
-0x55:"EOR zp,X",
-0x56:"LSR zp,X",
-0x58:"CLI",
-0x59:"EOR Abs,Y",
-0x5D:"EOR Abs,X",
-0x5E:"LSR Abs,X",
-0x60:"RTS",
-0x61:"ADC (zp,X)",
-0x65:"ADC zp",
-0x66:"ROR zp",
-0x68:"PLA",
-0x69:"ADC #",
-0x6A:"ROR ",
-0x6C:"JMP (Abs)",
-0x6D:"ADC Abs",
-0x6E:"ROR Abs",
-0x70:"BVS ",
-0x71:"ADC (zp),Y",
-0x75:"ADC zp,X",
-0x76:"ROR zp,X",
-0x78:"SEI",
-0x79:"ADC Abs,Y",
-0x7D:"ADC Abs,X",
-0x7E:"ROR Abs,X",
-0x81:"STA (zp,X)",
-0x84:"STY zp",
-0x85:"STA zp",
-0x86:"STX zp",
-0x88:"DEY",
-0x8A:"TXA",
-0x8C:"STY Abs",
-0x8D:"STA Abs",
-0x8E:"STX Abs",
-0x90:"BCC ",
-0x91:"STA (zp),Y",
-0x94:"STY zp,X",
-0x95:"STA zp,X",
-0x96:"STX zp,Y",
-0x98:"TYA",
-0x99:"STA Abs,Y",
-0x9A:"TXS",
-0x9D:"STA Abs,X",
-0xA0:"LDY #",
-0xA1:"LDA (zp,X)",
-0xA2:"LDX #",
-0xA4:"LDY zp",
-0xA5:"LDA zp",
-0xA6:"LDX zp",
-0xA8:"TAY",
-0xA9:"LDA #",
-0xAA:"TAX",
-0xAC:"LDY Abs",
-0xAD:"LDA Abs",
-0xAE:"LDX Abs",
-0xB0:"BCS ",
-0xB1:"LDA (zp),Y",
-0xB4:"LDY zp,X",
-0xB5:"LDA zp,X",
-0xB6:"LDX zp,Y",
-0xB8:"CLV",
-0xB9:"LDA Abs,Y",
-0xBA:"TSX",
-0xBC:"LDY Abs,X",
-0xBD:"LDA Abs,X",
-0xBE:"LDX Abs,Y",
-0xC0:"CPY #",
-0xC1:"CMP (zp,X)",
-0xC4:"CPY zp",
-0xC5:"CMP zp",
-0xC6:"DEC zp",
-0xC8:"INY",
-0xC9:"CMP #",
-0xCA:"DEX",
-0xCC:"CPY Abs",
-0xCD:"CMP Abs",
-0xCE:"DEC Abs",
-0xD0:"BNE ",
-0xD1:"CMP (zp),Y",
-0xD5:"CMP zp,X",
-0xD6:"DEC zp,X",
-0xD8:"CLD",
-0xD9:"CMP Abs,Y",
-0xDD:"CMP Abs,X",
-0xDE:"DEC Abs,X",
-0xE0:"CPX #",
-0xE1:"SBC (zp,X)",
-0xE4:"CPX zp",
-0xE5:"SBC zp",
-0xE6:"INC zp",
-0xE8:"INX",
-0xE9:"SBC #",
-0xEA:"NOP",
-0xEC:"CPX Abs",
-0xED:"SBC Abs",
-0xEE:"INC Abs",
-0xF0:"BEQ ",
-0xF1:"SBC (zp),Y",
-0xF5:"SBC zp,X",
-0xF6:"INC zp,X",
-0xF8:"SED",
-0xF9:"SBC Abs,Y",
-0xFD:"SBC Abs,X",
-0xFE:"INC Abs,X",
+    0x00:"BRK",
+    0x01:"ORA (zp,X)",
+    0x05:"ORA zp",
+    0x06:"ASL zp",
+    0x08:"PHP",
+    0x09:"ORA #",
+    0x0A:"ASL ",
+    0x0D:"ORA Abs",
+    0x0E:"ASL Abs",
+    0x10:"BPL ",
+    0x11:"ORA (zp),Y",
+    0x15:"ORA zp,X",
+    0x16:"ASL zp,X",
+    0x18:"CLC",
+    0x19:"ORA Abs,Y",
+    0x1D:"ORA Abs,X",
+    0x1E:"ASL Abs,X",
+    0x20:"JSR Abs",
+    0x21:"AND (zp,X)",
+    0x24:"BIT zp",
+    0x25:"AND zp",
+    0x26:"ROL zp",
+    0x28:"PLP",
+    0x29:"AND #",
+    0x2A:"ROL ",
+    0x2C:"BIT Abs",
+    0x2D:"AND Abs",
+    0x2E:"ROL Abs",
+    0x30:"BMI ",
+    0x31:"AND (zp),Y",
+    0x35:"AND zp,X",
+    0x36:"ROL zp,X",
+    0x38:"SEC",
+    0x39:"AND Abs,Y",
+    0x3D:"AND Abs,X",
+    0x3E:"ROL Abs,X",
+    0x40:"RTI",
+    0x41:"EOR (zp,X)",
+    0x45:"EOR zp",
+    0x46:"LSR zp",
+    0x48:"PHA",
+    0x49:"EOR #",
+    0x4A:"LSR ",
+    0x4C:"JMP Abs",
+    0x4D:"EOR Abs",
+    0x4E:"LSR Abs",
+    0x50:"BVC ",
+    0x51:"EOR (zp),Y",
+    0x55:"EOR zp,X",
+    0x56:"LSR zp,X",
+    0x58:"CLI",
+    0x59:"EOR Abs,Y",
+    0x5D:"EOR Abs,X",
+    0x5E:"LSR Abs,X",
+    0x60:"RTS",
+    0x61:"ADC (zp,X)",
+    0x65:"ADC zp",
+    0x66:"ROR zp",
+    0x68:"PLA",
+    0x69:"ADC #",
+    0x6A:"ROR ",
+    0x6C:"JMP (Abs)",
+    0x6D:"ADC Abs",
+    0x6E:"ROR Abs",
+    0x70:"BVS ",
+    0x71:"ADC (zp),Y",
+    0x75:"ADC zp,X",
+    0x76:"ROR zp,X",
+    0x78:"SEI",
+    0x79:"ADC Abs,Y",
+    0x7D:"ADC Abs,X",
+    0x7E:"ROR Abs,X",
+    0x81:"STA (zp,X)",
+    0x84:"STY zp",
+    0x85:"STA zp",
+    0x86:"STX zp",
+    0x88:"DEY",
+    0x8A:"TXA",
+    0x8C:"STY Abs",
+    0x8D:"STA Abs",
+    0x8E:"STX Abs",
+    0x90:"BCC ",
+    0x91:"STA (zp),Y",
+    0x94:"STY zp,X",
+    0x95:"STA zp,X",
+    0x96:"STX zp,Y",
+    0x98:"TYA",
+    0x99:"STA Abs,Y",
+    0x9A:"TXS",
+    0x9D:"STA Abs,X",
+    0xA0:"LDY #",
+    0xA1:"LDA (zp,X)",
+    0xA2:"LDX #",
+    0xA4:"LDY zp",
+    0xA5:"LDA zp",
+    0xA6:"LDX zp",
+    0xA8:"TAY",
+    0xA9:"LDA #",
+    0xAA:"TAX",
+    0xAC:"LDY Abs",
+    0xAD:"LDA Abs",
+    0xAE:"LDX Abs",
+    0xB0:"BCS ",
+    0xB1:"LDA (zp),Y",
+    0xB4:"LDY zp,X",
+    0xB5:"LDA zp,X",
+    0xB6:"LDX zp,Y",
+    0xB8:"CLV",
+    0xB9:"LDA Abs,Y",
+    0xBA:"TSX",
+    0xBC:"LDY Abs,X",
+    0xBD:"LDA Abs,X",
+    0xBE:"LDX Abs,Y",
+    0xC0:"CPY #",
+    0xC1:"CMP (zp,X)",
+    0xC4:"CPY zp",
+    0xC5:"CMP zp",
+    0xC6:"DEC zp",
+    0xC8:"INY",
+    0xC9:"CMP #",
+    0xCA:"DEX",
+    0xCC:"CPY Abs",
+    0xCD:"CMP Abs",
+    0xCE:"DEC Abs",
+    0xD0:"BNE ",
+    0xD1:"CMP (zp),Y",
+    0xD5:"CMP zp,X",
+    0xD6:"DEC zp,X",
+    0xD8:"CLD",
+    0xD9:"CMP Abs,Y",
+    0xDD:"CMP Abs,X",
+    0xDE:"DEC Abs,X",
+    0xE0:"CPX #",
+    0xE1:"SBC (zp,X)",
+    0xE4:"CPX zp",
+    0xE5:"SBC zp",
+    0xE6:"INC zp",
+    0xE8:"INX",
+    0xE9:"SBC #",
+    0xEA:"NOP",
+    0xEC:"CPX Abs",
+    0xED:"SBC Abs",
+    0xEE:"INC Abs",
+    0xF0:"BEQ ",
+    0xF1:"SBC (zp),Y",
+    0xF5:"SBC zp,X",
+    0xF6:"INC zp,X",
+    0xF8:"SED",
+    0xF9:"SBC Abs,Y",
+    0xFD:"SBC Abs,X",
+    0xFE:"INC Abs,X",
 };
+
 // This file testprogram.js can be substituted by one of several tests
 // which may not be redistributable
 // for example
@@ -2017,27 +1966,26 @@ var dis6502={
 //
 // (can use xxd -i to convert binary into C include syntax, as a starting point)
 //
-testprogramAddress=0x0000;
+testprogramAddress = 0x0000;
 
 // we want to auto-clear the console if any output is sent by the program
-var consoleboxStream="";
+var consoleboxStream = "";
 
 // demonstrate write hook
-writeTriggers[0x000F]="consoleboxStream += String.fromCharCode(d);"+
-                      "consolebox.innerHTML = consoleboxStream;";
+writeTriggers[0x000F] = 
+    "consoleboxStream += String.fromCharCode(d);"+
+    "consolebox.innerHTML = consoleboxStream;";
 
 // demonstrate read hook (not used by this test program)
-readTriggers[0xD011]="((consolegetc==undefined)?0:0xff)";  // return zero until we have a char
-readTriggers[0xD010]="var c=consolegetc; consolegetc=undefined; (c)";
+readTriggers[0xD011] = "((consolegetc==undefined)?0:0xff)";  // return zero until we have a char
+readTriggers[0xD010] = "var c=consolegetc; consolegetc=undefined; (c)";
 
 testprogram = [
 	0xa9, 0x00,              // LDA #$00
 	0x20, 0x10, 0x00,        // JSR $0010
 	0x4c, 0x02, 0x00,        // JMP $0002
-
 	0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x40,
-
 	0xe8,                    // INX
 	0x88,                    // DEY
 	0xe6, 0x0F,              // INC $0F
